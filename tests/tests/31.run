@@ -1,0 +1,2 @@
+#!/bin/bash
+(test -f ./test_bb_count_concurrent || (cd ../solution && make test_bb_count_concurrent > /dev/null 2>&1)) && timeout 30 ./test_bb_count_concurrent 2>&1 | grep -q "CONCURRENT bb_count TEST: PASSED" && echo "Test PASSED" || echo "Test FAILED"

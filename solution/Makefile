@@ -55,13 +55,14 @@ RWSTRESS_TSAN = ../tests/test_rw_stress.c \
 # New comprehensive tests (deterministic only)
 BB_SINGLE = ../tests/test_bb_single_thread.c src/sync_utils.c src/bounded_buffer.c
 BB_SPSC_SLOW = ../tests/test_bb_spsc_slow.c src/sync_utils.c src/bounded_buffer.c
+BB_COUNT_CONCURRENT = ../tests/test_bb_count_concurrent.c src/sync_utils.c src/bounded_buffer.c
 
 OBJ     = $(SRC:.c=.o)
 
 all: conference_sim test_scenario test_bounded_buffer test_rw_sequences test_rw_stress \
      test_rwm_sequences test_rwm_stress \
      test_bb_sequences test_bb_stress test_rw_tsan test_rwm_tsan \
-     test_bb_single_thread test_bb_spsc_slow
+     test_bb_single_thread test_bb_spsc_slow test_bb_count_concurrent
 
 conference_sim: $(SRC)
 	$(CC) $(CFLAGS) $(INCLUDE) -o $@ $(SRC) $(LDFLAGS)
@@ -103,13 +104,16 @@ test_bb_single_thread: $(BB_SINGLE)
 test_bb_spsc_slow: $(BB_SPSC_SLOW)
 	$(CC) $(CFLAGS) $(INCLUDE) -o ../tests/$@ $(BB_SPSC_SLOW) $(LDFLAGS)
 
+test_bb_count_concurrent: $(BB_COUNT_CONCURRENT)
+	$(CC) $(CFLAGS) $(INCLUDE) -o ../tests/$@ $(BB_COUNT_CONCURRENT) $(LDFLAGS)
+
 clean:
 	rm -f conference_sim $(OBJ)
 	rm -rf *.dSYM
 	rm -f ../tests/test_scenario ../tests/test_bounded_buffer ../tests/test_rw_sequences ../tests/test_rw_stress \
 	      ../tests/test_rwm_sequences ../tests/test_rwm_stress \
 	      ../tests/test_bb_sequences ../tests/test_bb_stress ../tests/test_rw_tsan ../tests/test_rwm_tsan \
-	      ../tests/test_bb_single_thread ../tests/test_bb_spsc_slow
+	      ../tests/test_bb_single_thread ../tests/test_bb_spsc_slow ../tests/test_bb_count_concurrent
 	rm -rf ../tests/*.dSYM
 
 .PHONY: all clean
