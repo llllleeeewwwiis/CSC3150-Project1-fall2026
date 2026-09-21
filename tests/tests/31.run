@@ -1,2 +1,19 @@
 #!/bin/bash
-(test -f ./test_bb_count_concurrent || (cd ../solution && make test_bb_count_concurrent > /dev/null 2>&1)) && timeout 30 ./test_bb_count_concurrent 2>&1 | grep -q "CONCURRENT bb_count TEST: PASSED" && echo "Test PASSED" || echo "Test FAILED"
+if [ ! -f ./test_bb_count_concurrent ]; then
+    (cd ../solution && make test_bb_count_concurrent > /dev/null 2>&1) || {
+        echo "Test FAILED"
+        exit 0
+    }
+fi
+
+log_file=$(mktemp "${TMPDIR:-/tmp}/bb-count-concurrent.XXXXXX")
+trap 'rm -f "$log_file"' EXIT
+
+timeout 30 ./test_bb_count_concurrent >"$log_file" 2>&1
+program_rc=$?
+
+if [ "$program_rc" -eq 0 ] && grep -q "CONCURRENT bb_count TEST: PASSED" "$log_file"; then
+    echo "Test PASSED"
+else
+    echo "Test FAILED"
+fi

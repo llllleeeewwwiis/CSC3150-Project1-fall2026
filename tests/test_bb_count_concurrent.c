@@ -123,6 +123,11 @@ static void *supervisor_thread(void *arg) {
         LOG("FAIL: supervisor observed invalid count=%d (capacity=%d)",
             count, test_queue.cap);
       }
+
+      /* Keep the observer concurrent without turning it into a busy-spinner.
+       * This matters on a single vCPU, where an unbounded polling loop could
+       * delay the producer and consumer threads it is meant to observe. */
+      usleep(100);
     }
 
     if (checkpoint_requested && !checkpoint_done) {
@@ -140,6 +145,14 @@ static void *supervisor_thread(void *arg) {
         supervisor_seen_active = 1;
       }
       pthread_cond_broadcast(&state_cond);
+
+      /* The requester clears checkpoint_requested after observing
+       * checkpoint_done.  Wait here while releasing state_mutex; otherwise
+       * the supervisor would loop with the mutex held and the requester could
+       * never clear the request. */
+      while (checkpoint_requested && !supervisor_stop) {
+        pthread_cond_wait(&state_cond, &state_mutex);
+      }
       continue;
     }
 
@@ -256,8 +269,9 @@ static void *churn_consumer_thread(void *arg) {
 static int run_blocking_checks(void) {
   pthread_t consumer;
   pthread_t producer;
+  int failed = 0;
 
-  if (request_checkpoint(0, "initial empty queue") != 0) return 1;
+  failed |= request_checkpoint(0, "initial empty queue");
 
   blocked_take_started = 0;
   blocked_take_done = 0;
@@ -269,17 +283,18 @@ static int run_blocking_checks(void) {
   pthread_mutex_unlock(&state_mutex);
   if (consumer_finished_early) {
     note_failure("consumer returned while the queue was empty");
+    failed = 1;
   }
-  if (request_checkpoint(0, "consumer blocked on empty queue") != 0) return 1;
+  failed |= request_checkpoint(0, "consumer blocked on empty queue");
 
   food_tray_t *first = create_food_tray(1, "Empty-queue tray", 1);
   bb_put(&test_queue, first);
   pthread_join(consumer, NULL);
-  if (request_checkpoint(0, "after blocked consumer is released") != 0) return 1;
+  failed |= request_checkpoint(0, "after blocked consumer is released");
 
   food_tray_t *full_item = create_food_tray(1, "Full-queue item", 1);
   bb_put(&test_queue, full_item);
-  if (request_checkpoint(1, "full queue before blocked producer") != 0) return 1;
+  failed |= request_checkpoint(1, "full queue before blocked producer");
 
   blocked_put_started = 0;
   blocked_put_done = 0;
@@ -291,23 +306,27 @@ static int run_blocking_checks(void) {
   pthread_mutex_unlock(&state_mutex);
   if (producer_finished_early) {
     note_failure("producer returned while the queue was full");
+    failed = 1;
   }
-  if (request_checkpoint(1, "producer blocked on full queue") != 0) return 1;
+  failed |= request_checkpoint(1, "producer blocked on full queue");
 
   food_tray_t *taken = bb_take(&test_queue);
   if (!taken || taken->tray_id != 1) {
     note_failure("FIFO order was broken while releasing blocked producer");
+    failed = 1;
   }
   free_food_tray(taken);
   pthread_join(producer, NULL);
 
-  if (request_checkpoint(1, "blocked producer inserted its tray") != 0) return 1;
+  failed |= request_checkpoint(1, "blocked producer inserted its tray");
   taken = bb_take(&test_queue);
   if (!taken || taken->tray_id != 2) {
     note_failure("blocked producer's tray was not delivered");
+    failed = 1;
   }
   free_food_tray(taken);
-  return request_checkpoint(0, "after full-queue check") != 0;
+  failed |= request_checkpoint(0, "after full-queue check");
+  return failed;
 }
 
 static int run_churn_checks(void) {
