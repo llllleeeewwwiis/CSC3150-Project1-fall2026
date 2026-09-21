@@ -1,19 +1,50 @@
 #!/bin/bash
-if [ ! -f ./test_bb_count_concurrent ]; then
-    (cd ../solution && make test_bb_count_concurrent > /dev/null 2>&1) || {
-        echo "Test FAILED"
-        exit 0
-    }
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+test_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+solution_dir="$test_dir/../solution"
+test_program="$test_dir/test_bb_count_concurrent"
+
+# Always rebuild this standalone test so a previously generated binary cannot
+# hide changes to the test or to the bounded-buffer implementation.
+build_log=$(mktemp "${TMPDIR:-/tmp}/bb-count-concurrent-build.XXXXXX")
+log_file=$(mktemp "${TMPDIR:-/tmp}/bb-count-concurrent.XXXXXX")
+debug_log="${TMPDIR:-/tmp}/bb-count-concurrent.last.log"
+trap 'rm -f "$build_log" "$log_file"' EXIT
+
+if ! (cd "$solution_dir" && make test_bb_count_concurrent >"$build_log" 2>&1); then
+    cp "$build_log" "$debug_log" 2>/dev/null || true
+    echo "Test FAILED"
+    exit 0
 fi
 
-log_file=$(mktemp "${TMPDIR:-/tmp}/bb-count-concurrent.XXXXXX")
-trap 'rm -f "$log_file"' EXIT
-
-timeout 30 ./test_bb_count_concurrent >"$log_file" 2>&1
-program_rc=$?
+if command -v timeout > /dev/null 2>&1; then
+    timeout 30 "$test_program" >"$log_file" 2>&1
+    program_rc=$?
+elif command -v gtimeout > /dev/null 2>&1; then
+    gtimeout 30 "$test_program" >"$log_file" 2>&1
+    program_rc=$?
+else
+    # Keep a timeout even on minimal systems without GNU coreutils.
+    "$test_program" >"$log_file" 2>&1 &
+    child_pid=$!
+    (
+        sleep 30
+        if kill -0 "$child_pid" 2>/dev/null; then
+            kill -TERM "$child_pid" 2>/dev/null
+            sleep 1
+            kill -KILL "$child_pid" 2>/dev/null
+        fi
+    ) &
+    watchdog_pid=$!
+    wait "$child_pid"
+    program_rc=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+fi
 
 if [ "$program_rc" -eq 0 ] && grep -q "CONCURRENT bb_count TEST: PASSED" "$log_file"; then
     echo "Test PASSED"
 else
+    cp "$log_file" "$debug_log" 2>/dev/null || true
     echo "Test FAILED"
 fi
