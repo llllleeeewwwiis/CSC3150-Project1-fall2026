@@ -1,0 +1,1 @@
+Reader-priority test: R2 admitted concurrently with R1 while W1 waiting
