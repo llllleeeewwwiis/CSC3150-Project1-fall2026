@@ -75,6 +75,7 @@ static void wait_for_flag(int *flag) {
 /* Request a count at a quiescent checkpoint.  The supervisor performs the
  * actual bb_count() call, so bb_count() is still called from another thread. */
 static int request_checkpoint(int expected, const char *label) {
+  LOG("CHECKPOINT request: %s (expected=%d)", label, expected);
   pthread_mutex_lock(&state_mutex);
   checkpoint_expected = expected;
   checkpoint_actual = -1;
@@ -96,6 +97,7 @@ static int request_checkpoint(int expected, const char *label) {
     note_failure("bb_count() returned an unexpected checkpoint value");
     return 1;
   }
+  LOG("CHECKPOINT complete: %s (actual=%d)", label, actual);
   return 0;
 }
 
@@ -394,6 +396,7 @@ int main(void) {
   pthread_t supervisor;
   pthread_create(&supervisor, NULL, supervisor_thread, NULL);
   wait_for_flag(&supervisor_started);
+  LOG("Supervisor thread started");
 
   int failed = 0;
   failed |= run_blocking_checks();
