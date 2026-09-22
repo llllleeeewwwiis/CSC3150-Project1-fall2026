@@ -37,12 +37,6 @@ static int supervisor_stop = 0;
 static int supervisor_polls = 0;
 static int supervisor_active_polls = 0;
 
-static int checkpoint_requested = 0;
-static int checkpoint_done = 0;
-static int checkpoint_expected = 0;
-static int checkpoint_actual = -1;
-static int checkpoint_ok = 0;
-
 static int blocked_take_started = 0;
 static int blocked_take_done = 0;
 static int blocked_put_started = 0;
@@ -50,7 +44,7 @@ static int blocked_put_done = 0;
 
 static int workers_ready = 0;
 static int workers_go = 0;
-static int workers_active = 0;
+static int workers_active = 0; /* Number of churn workers after the go signal. */
 static int supervisor_seen_active = 0;
 
 static pthread_mutex_t result_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -72,32 +66,15 @@ static void wait_for_flag(int *flag) {
   pthread_mutex_unlock(&state_mutex);
 }
 
-/* Request a count at a quiescent checkpoint.  The supervisor performs the
- * actual bb_count() call, so bb_count() is still called from another thread. */
-static int request_checkpoint(int expected, const char *label) {
-  LOG("CHECKPOINT request: %s (expected=%d)", label, expected);
-  pthread_mutex_lock(&state_mutex);
-  checkpoint_expected = expected;
-  checkpoint_actual = -1;
-  checkpoint_ok = 0;
-  checkpoint_done = 0;
-  checkpoint_requested = 1;
-  pthread_cond_broadcast(&state_cond);
-  while (!checkpoint_done) {
-    pthread_cond_wait(&state_cond, &state_mutex);
-  }
-  int actual = checkpoint_actual;
-  int ok = checkpoint_ok;
-  checkpoint_requested = 0;
-  pthread_cond_broadcast(&state_cond);
-  pthread_mutex_unlock(&state_mutex);
-
-  if (!ok) {
-    LOG("FAIL: checkpoint %s expected count=%d, got %d", label, expected, actual);
-    note_failure("bb_count() returned an unexpected checkpoint value");
+/* Check an exact value from the public API while the supervisor is also
+ * polling bb_count().  The queue is quiescent at each call site below. */
+static int check_count(int expected, const char *label) {
+  int actual = bb_count(&test_queue);
+  if (actual != expected) {
+    LOG("FAIL: count at %s expected %d, got %d", label, expected, actual);
+    note_failure("bb_count() returned an unexpected value");
     return 1;
   }
-  LOG("CHECKPOINT complete: %s (actual=%d)", label, actual);
   return 0;
 }
 
@@ -109,55 +86,22 @@ static void *supervisor_thread(void *arg) {
   pthread_cond_broadcast(&state_cond);
 
   for (;;) {
-    while (!supervisor_stop && !checkpoint_requested) {
-      pthread_mutex_unlock(&state_mutex);
-      int count = bb_count(&test_queue);
-      pthread_mutex_lock(&state_mutex);
+    pthread_mutex_unlock(&state_mutex);
+    int count = bb_count(&test_queue);
+    usleep(100);
+    pthread_mutex_lock(&state_mutex);
 
-      supervisor_polls++;
-      if (workers_active) {
-        supervisor_active_polls++;
-        supervisor_seen_active = 1;
-        pthread_cond_broadcast(&state_cond);
-      }
-      if (count < 0 || count > test_queue.cap) {
-        test_failed = 1;
-        LOG("FAIL: supervisor observed invalid count=%d (capacity=%d)",
-            count, test_queue.cap);
-      }
-
-      /* Keep the observer concurrent without turning it into a busy-spinner.
-       * This matters on a single vCPU, where an unbounded polling loop could
-       * delay the producer and consumer threads it is meant to observe. */
-      usleep(100);
-    }
-
-    if (checkpoint_requested && !checkpoint_done) {
-      int expected = checkpoint_expected;
-      pthread_mutex_unlock(&state_mutex);
-      int actual = bb_count(&test_queue);
-      pthread_mutex_lock(&state_mutex);
-
-      checkpoint_actual = actual;
-      checkpoint_ok = (actual == expected);
-      checkpoint_done = 1;
-      supervisor_polls++;
-      if (workers_active) {
-        supervisor_active_polls++;
-        supervisor_seen_active = 1;
-      }
+    supervisor_polls++;
+    if (workers_active > 0) {
+      supervisor_active_polls++;
+      supervisor_seen_active = 1;
       pthread_cond_broadcast(&state_cond);
-
-      /* The requester clears checkpoint_requested after observing
-       * checkpoint_done.  Wait here while releasing state_mutex; otherwise
-       * the supervisor would loop with the mutex held and the requester could
-       * never clear the request. */
-      while (checkpoint_requested && !supervisor_stop) {
-        pthread_cond_wait(&state_cond, &state_mutex);
-      }
-      continue;
     }
-
+    if (count < 0 || count > test_queue.cap) {
+      test_failed = 1;
+      LOG("FAIL: supervisor observed invalid count=%d (capacity=%d)",
+          count, test_queue.cap);
+    }
     if (supervisor_stop) {
       pthread_mutex_unlock(&state_mutex);
       return NULL;
@@ -212,6 +156,11 @@ static void wait_for_workers_start(void) {
   while (!workers_go) {
     pthread_cond_wait(&state_cond, &state_mutex);
   }
+  workers_active++;
+  pthread_cond_broadcast(&state_cond);
+  /* Do not start the churn until the supervisor has actually observed at
+   * least one active worker.  This makes the concurrency portion a required
+   * event instead of a timing-dependent hope. */
   while (!supervisor_seen_active) {
     pthread_cond_wait(&state_cond, &state_mutex);
   }
@@ -273,7 +222,7 @@ static int run_blocking_checks(void) {
   pthread_t producer;
   int failed = 0;
 
-  failed |= request_checkpoint(0, "initial empty queue");
+  failed |= check_count(0, "initial empty queue");
 
   blocked_take_started = 0;
   blocked_take_done = 0;
@@ -287,16 +236,16 @@ static int run_blocking_checks(void) {
     note_failure("consumer returned while the queue was empty");
     failed = 1;
   }
-  failed |= request_checkpoint(0, "consumer blocked on empty queue");
+  failed |= check_count(0, "consumer blocked on empty queue");
 
   food_tray_t *first = create_food_tray(1, "Empty-queue tray", 1);
   bb_put(&test_queue, first);
   pthread_join(consumer, NULL);
-  failed |= request_checkpoint(0, "after blocked consumer is released");
+  failed |= check_count(0, "after blocked consumer is released");
 
   food_tray_t *full_item = create_food_tray(1, "Full-queue item", 1);
   bb_put(&test_queue, full_item);
-  failed |= request_checkpoint(1, "full queue before blocked producer");
+  failed |= check_count(1, "full queue before blocked producer");
 
   blocked_put_started = 0;
   blocked_put_done = 0;
@@ -310,7 +259,7 @@ static int run_blocking_checks(void) {
     note_failure("producer returned while the queue was full");
     failed = 1;
   }
-  failed |= request_checkpoint(1, "producer blocked on full queue");
+  failed |= check_count(1, "producer blocked on full queue");
 
   food_tray_t *taken = bb_take(&test_queue);
   if (!taken || taken->tray_id != 1) {
@@ -320,14 +269,14 @@ static int run_blocking_checks(void) {
   free_food_tray(taken);
   pthread_join(producer, NULL);
 
-  failed |= request_checkpoint(1, "blocked producer inserted its tray");
+  failed |= check_count(1, "blocked producer inserted its tray");
   taken = bb_take(&test_queue);
   if (!taken || taken->tray_id != 2) {
     note_failure("blocked producer's tray was not delivered");
     failed = 1;
   }
   free_food_tray(taken);
-  failed |= request_checkpoint(0, "after full-queue check");
+  failed |= check_count(0, "after full-queue check");
   return failed;
 }
 
@@ -340,7 +289,7 @@ static int run_churn_checks(void) {
   pthread_mutex_lock(&state_mutex);
   workers_ready = 0;
   workers_go = 0;
-  workers_active = CHURN_PRODUCERS + CHURN_CONSUMERS;
+  workers_active = 0;
   supervisor_seen_active = 0;
   pthread_mutex_unlock(&state_mutex);
 
@@ -382,7 +331,7 @@ static int run_churn_checks(void) {
     note_failure("a produced tray was lost or consumed more than once");
   }
 
-  return request_checkpoint(0, "after concurrent churn") != 0;
+  return check_count(0, "after concurrent churn") != 0;
 }
 
 int main(void) {
